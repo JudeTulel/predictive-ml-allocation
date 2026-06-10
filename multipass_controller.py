@@ -14,6 +14,8 @@ Responsibilities
 from __future__ import annotations
 
 import json
+import csv
+import os
 import shlex
 import subprocess
 import threading
@@ -269,14 +271,27 @@ class MetricsCollector:
     rolling history of `max_history` samples per VM.
     """
 
-    def __init__(self, controller: MultipassController, interval: float = 15.0, max_history: int = 60):
+    def __init__(
+        self,
+        controller: MultipassController,
+        interval: float = 15.0,
+        max_history: int = 60,
+        export_path: str | None = None,
+    ):
         self._ctrl     = controller
         self._interval = interval
         self._max      = max_history
+        self._export_path = export_path or os.path.join(
+            os.path.dirname(__file__),
+            "data",
+            "prometheus_exports",
+            "cluster_metrics.csv",
+        )
         self._lock     = threading.Lock()
         self._history: dict[str, list[dict]] = {}
         self._running  = False
         self._thread: threading.Thread | None = None
+        self._csv_header_written = os.path.exists(self._export_path) and os.path.getsize(self._export_path) > 0
 
     def start(self):
         if self._running:
@@ -296,6 +311,28 @@ class MetricsCollector:
         hist = self.get_history(vm_name)
         return hist[-1] if hist else {}
 
+    def _append_export(self, sample: dict) -> None:
+        os.makedirs(os.path.dirname(self._export_path), exist_ok=True)
+        fieldnames = [
+            "ts",
+            "vm",
+            "cpu",
+            "mem_pct",
+            "mem_used",
+            "mem_total",
+            "disk_r",
+            "disk_w",
+            "net_s",
+            "net_r",
+        ]
+        write_header = not os.path.exists(self._export_path) or os.path.getsize(self._export_path) == 0
+        with open(self._export_path, "a", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+                self._csv_header_written = True
+            writer.writerow({k: sample.get(k, "") for k in fieldnames})
+
     def _loop(self):
         while self._running:
             vms = self._ctrl.list_vms()
@@ -312,6 +349,10 @@ class MetricsCollector:
                             hist.append(m)
                             if len(hist) > self._max:
                                 hist.pop(0)
+                        try:
+                            self._append_export(m)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             time.sleep(self._interval)
